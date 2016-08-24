@@ -8,13 +8,20 @@
 
 import UIKit
 
-let kHTPGitUsersViewControllerElementsAtPage: Int = 20
+let kHTPGitUsersViewControllerElementsAtPage: Int = 10
+
 private var g_imageCache = [String:UIImage]()
 
+var pageToETag = [Int:String]()
+var pageToUsers = [Int:Array<Dictionary<String,String>>]()
+var pageIsLoading = [Int:Bool]()
+
+var connection :NSURLSession? = nil
 
 class HTPGitUsersViewController: UITableViewController {
 
-var urlRequest: NSMutableURLRequest? = nil;
+var urlRequestPath: String? = nil;
+var parameters = [NSObject:AnyObject]()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -25,77 +32,157 @@ var urlRequest: NSMutableURLRequest? = nil;
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
         
-        _allUsers = nil
+        _allUsers = [Int:Array<Dictionary<String, AnyObject>>]()
     }
 
     // MARK: - Table view data source
+    
+    private var _allUsers = [Int:Array<Dictionary<String, AnyObject>>]()
+    func loadUsers(page: Int, completion:(users: Array<Dictionary<String,AnyObject>>?) -> Void) -> Void
+    {
+        let server: OCTServer = OCTServer.dotComServer()
+        let user: OCTUser = OCTUser(rawLogin:"smartiushev", server:server)
+        let client: OCTClient = OCTClient.unauthenticatedClientWithUser(user)
+        if nil == self.urlRequestPath
+        {
+            self.urlRequestPath = "users"
+        }
+        
+        // TODO: rewrite
+        if self.urlRequestPath == "users"
+        {
+            if page > 0
+            {
+                if let userInfos = _allUsers[page - 1]
+                {
+                    if let userInfo = userInfos.last
+                    {
+                        if let last_id = userInfo["id"] as? Int
+                        {
+                            self.parameters = ["per_page" : kHTPGitUsersViewControllerElementsAtPage, "since" : last_id]
+                        }
+                    }
+                }
+            }
+            else
+            {
+                self.parameters = ["per_page" : kHTPGitUsersViewControllerElementsAtPage, "since" : "0"]
+            }
+        }
+        else
+        {
+            self.parameters = ["per_page" : kHTPGitUsersViewControllerElementsAtPage, "page" : page + 1]
+        }
+        
+        
+        let urlRequest: NSURLRequest = client.requestWithMethod("GET", path: urlRequestPath, parameters:parameters, notMatchingEtag: pageToETag[page]) // Fetch new elements for page if needed
+        if nil == connection
+        {
+            connection = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration())
+        }
+        
+        let dataTask: NSURLSessionDataTask = connection!.dataTaskWithRequest(urlRequest) { (data: NSData?, responce: NSURLResponse?, error: NSError?) -> Void in
+            if data?.length > 0 && responce?.MIMEType == "application/json"
+            {
+                var json: Array<AnyObject>!
+                do {
+                    json = try NSJSONSerialization.JSONObjectWithData(data!, options: NSJSONReadingOptions()) as? Array
+                } catch {
+                    print(error)
+                }
+                
+                // Store ETag for next page request
+                if let urlResponse = responce as? NSHTTPURLResponse
+                {
+                    pageToETag[page] = urlResponse.allHeaderFields["Etag"] as? String
+                }
+                
+            
+                var newUsers = [Dictionary<String, AnyObject>]()
+                for dictionary in json {
+                    var dict = dictionary as? [String : AnyObject]
+                    var userInfo: Dictionary<String, AnyObject>! = [:]
+                    userInfo["login"] = dict!["login"] as? String
+                    userInfo["avatar_url"] = dict!["avatar_url"] as? String
+                    userInfo["html_url"] = dict!["html_url"] as? String
+                    userInfo["followers_url"] = dict!["followers_url"] as? String
+                    userInfo["id"] = dict!["id"] as? Int
+                    
+                    newUsers.append(userInfo)
+                }
+                
+                completion(users: newUsers)
+            }
+            else
+            {
+                completion(users: nil)
+            }
+        }
+        dataTask.resume()
+    }
 
     override func tableView(tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         return 100
     }
 
     var once: dispatch_once_t = 0;
-    private var _allUsers: Dictionary<Int,Dictionary<String, String>>?
-    private var _usersInfoIsLoading = false
-    func filteredUser(index: Int) -> Dictionary<String, String>? {
+    
+    
+    func filteredUser(index: Int) -> Dictionary<String, AnyObject>? {
         
-        var resultInfo: Dictionary<String,String>? = nil
-        if nil == _allUsers && !_usersInfoIsLoading
+        var resultInfo: Dictionary<String,AnyObject>? = nil
+        
+        let page: Int = (index / kHTPGitUsersViewControllerElementsAtPage)
+        
+        if nil == pageIsLoading[page]
         {
-            _usersInfoIsLoading = true
-            
-            
-            if nil == self.urlRequest
-            {
-                // Not realy need {
-                let server: OCTServer = OCTServer.dotComServer()
-                let user: OCTUser = OCTUser(rawLogin:"smartiushev", server:server)
-                let client: OCTClient = OCTClient.unauthenticatedClientWithUser(user)
-                // }
-                self.urlRequest = client.requestWithMethod("GET", path: "users", parameters:["per_page" : 100], notMatchingEtag: nil) // Always fetch latest data
-            }
-            
-            let connection :NSURLSession =  NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration())
-            let dataTask: NSURLSessionDataTask = connection.dataTaskWithRequest(self.urlRequest!) { (data: NSData?, responce: NSURLResponse?, error: NSError?) -> Void in
-                if responce?.MIMEType == "application/json"
+           pageIsLoading[page] = false
+        }
+        
+        if !pageIsLoading[page]!
+        {
+            pageIsLoading[page] = true
+            self.loadUsers(page) { (users) in
+                if let newUsers = users
                 {
-                    var json: Array<AnyObject>!
-                    do {
-                        json = try NSJSONSerialization.JSONObjectWithData(data!, options: NSJSONReadingOptions()) as? Array
-                    } catch {
-                        print(error)
+                    if !newUsers.isEmpty
+                    {
+                        if nil == self._allUsers[page]
+                        {
+                            self._allUsers[page] = newUsers
+                        }
+                        else
+                        {
+                            self._allUsers[page]!.appendContentsOf(newUsers)
+                            // sort ?
+                        }
                     }
-                
-                    var allUsers: Dictionary<Int,Dictionary<String, String>> = [:]
-                    var i: Int! = 0
-                    for dictionary in json {
-                        var dict = dictionary as? [String : AnyObject]
-                        var userInfo: Dictionary<String, String>! = [:]
-                        userInfo["login"] = dict!["login"] as? String
-                        userInfo["avatar_url"] = dict!["avatar_url"] as? String
-                        userInfo["html_url"] = dict!["html_url"] as? String
-                        userInfo["followers_url"] = dict!["followers_url"] as? String
-                        
-                        allUsers[i] = userInfo
-                        i = i+1
-                    }
-                    self._allUsers = allUsers
                     
                     dispatch_async(dispatch_get_main_queue(), {
-                        if let indexPaths = self.tableView.indexPathsForVisibleRows
+                        if nil != self.tableView.superview
                         {
-                            self.tableView.reloadRowsAtIndexPaths(indexPaths, withRowAnimation: UITableViewRowAnimation.None)
+                            if let indexPaths = self.tableView.indexPathsForVisibleRows
+                            {
+                                self.tableView.reloadRowsAtIndexPaths(indexPaths, withRowAnimation: UITableViewRowAnimation.None)
+                            }
                         }
                     })
                 }
+                pageIsLoading[page] = false
             }
-            dataTask.resume()
         }
         
-        resultInfo = self._allUsers != nil ? self._allUsers![index] : nil;
+        if let users = self._allUsers[page]
+        {
+            if users.count > (index - page * kHTPGitUsersViewControllerElementsAtPage)
+            {
+                resultInfo = users[index - page * kHTPGitUsersViewControllerElementsAtPage]
+            }
+        }
         
-        return (resultInfo != nil) ? resultInfo!: ["no name":"no name"]
+        return (resultInfo != nil) ? resultInfo!: ["":""]
     }
+    
     
     override func tableView(tableView: UITableView, cellForRowAtIndexPath indexPath: NSIndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCellWithIdentifier("kHTPUserRowIdentifier", forIndexPath: indexPath)
@@ -103,19 +190,21 @@ var urlRequest: NSMutableURLRequest? = nil;
         cell.imageView?.image = nil
         cell.textLabel?.text = nil
         cell.detailTextLabel?.text = nil
+        cell.accessoryType = UITableViewCellAccessoryType.None;
 
         if let userRow = self.filteredUser(indexPath.row)
         {
-            if let text = userRow["login"]
+            cell.accessoryType = UITableViewCellAccessoryType.DisclosureIndicator
+            if let text = userRow["login"] as? String
             {
                 cell.textLabel?.text = text
             }
-            if let text = userRow["html_url"]
+            if let text = userRow["html_url"] as? String
             {
                 cell.detailTextLabel?.text = text
             }
             
-            if let urlString = userRow["avatar_url"]
+            if let urlString = userRow["avatar_url"] as? String
             {
                 let imageURL = NSURL(string: urlString)
                 
@@ -129,10 +218,13 @@ var urlRequest: NSMutableURLRequest? = nil;
                         let image = UIImage(data: data!)
                         g_imageCache[urlString] = image
                         dispatch_async(dispatch_get_main_queue(), {
-                            if let cellToUpdate = tableView.cellForRowAtIndexPath(indexPath)
+                            if nil != tableView.superview
                             {
-                                cellToUpdate.imageView?.image = image
-                                tableView.reloadRowsAtIndexPaths([indexPath], withRowAnimation: UITableViewRowAnimation.None)
+                                if let cellToUpdate = tableView.cellForRowAtIndexPath(indexPath)
+                                {
+                                    cellToUpdate.imageView?.image = image
+                                    tableView.reloadRowsAtIndexPaths([indexPath], withRowAnimation: UITableViewRowAnimation.None)
+                                }
                             }
                         })
                     })
@@ -158,20 +250,12 @@ var urlRequest: NSMutableURLRequest? = nil;
             {
                 if let cell = sender as? UITableViewCell
                 {
-                    if let index = self.tableView.indexPathForCell(cell)?.row
+                    if let login = cell.textLabel?.text
                     {
-                        if let userRow = self.filteredUser(index)
-                        {
-                            if let url = NSURL(string: userRow["followers_url"]!)
-                            {
-                                gitUsersVC.urlRequest = NSMutableURLRequest(URL: url)
-                            }
-                        }
+                        gitUsersVC.urlRequestPath = "users/\(login)/followers"
                     }
                 }
-                
             }
-
         }
     }
 }
